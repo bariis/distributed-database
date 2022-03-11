@@ -1,23 +1,37 @@
 package main
 
 import (
+	"flag"
+	"fmt"
+	"github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
 	transport "github.com/Jille/raft-grpc-transport"
+	"github.com/Jille/raftadmin"
 	"github.com/bariis/distributed-database/proto"
 	"github.com/hashicorp/raft"
 	boltdb "github.com/hashicorp/raft-boltdb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 )
 
+var (
+	bootstrap = flag.Bool("bootstrap", false, "Bootstrap RAFT Cluster")
+	port      = flag.Int("port", 8001, "Cluster member port")
+	nodeId    = flag.String("node_id", "", "Node identifier")
+)
+
 func main() {
+
+	flag.Parse()
+
 	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID("test")
+	config.LocalID = raft.ServerID(*nodeId)
 	fsm := NewDemory()
 
-	basedir := filepath.Join("/tmp", "test")
+	basedir := filepath.Join("/tmp", *nodeId)
 	mkdirErr := os.MkdirAll(basedir, os.ModePerm)
 	if mkdirErr != nil {
 		log.Fatalf("mkdir error %v", mkdirErr)
@@ -45,22 +59,24 @@ func main() {
 		log.Fatalf("raft error %v:", raftErr)
 	}
 
-	cfg := raft.Configuration{
-		Servers: []raft.Server{
-			{
-				Suffrage: raft.Voter,
-				ID:       "test",
-				Address:  raft.ServerAddress("localhost:8081"),
+	if *bootstrap {
+		cfg := raft.Configuration{
+			Servers: []raft.Server{
+				{
+					Suffrage: raft.Voter,
+					ID:       raft.ServerID(*nodeId),
+					Address:  raft.ServerAddress("localhost:8081"),
+				},
 			},
-		},
+		}
+
+		cluster := r.BootstrapCluster(cfg)
+		if err := cluster.Error(); err != nil {
+			log.Fatalf("bootstrap error %v", err)
+		}
 	}
 
-	cluster := r.BootstrapCluster(cfg)
-	if err := cluster.Error(); err != nil {
-		log.Fatalf("bootstrap error %v", err)
-	}
-
-	socket, socketErr := net.Listen("tcp", ":8081")
+	socket, socketErr := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if socketErr != nil {
 		log.Fatalf("socket error %v:", socketErr)
 	}
@@ -72,6 +88,9 @@ func main() {
 	})
 
 	manager.Register(server)
+	leaderhealth.Setup(r, server, []string{"Leader"})
+	raftadmin.Register(server, r)
+	reflection.Register(server)
 	serveErr := server.Serve(socket)
 	if serveErr != nil {
 		log.Fatalf("serve error %v:", serveErr)
